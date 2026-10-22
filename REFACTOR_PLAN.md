@@ -57,7 +57,7 @@ Only the code that sends the prompt to a model and gets text back is touched.
 
 ## Steps
 
-### Step 0: Import upstream code (verbatim baseline)
+### Step 0: Import upstream code (verbatim baseline) (done, `a52ef43`)
 - **Action:** Copy everything from the temporary clone `LLMs_psychopathologies/` (except `.git/`) into the repo root. Recreate `src/__init__.py` (empty).
   Merge upstream's `.gitignore` into the root one **without** the `*.png`, `outputs/figs/` and `outputs/tables/` rules, so the publication figures and tables stay tracked.
   Add a "Source" credit at the top of `README.md`. Remove the temporary clone once the import is verified.
@@ -67,22 +67,22 @@ Only the code that sends the prompt to a model and gets text back is touched.
 
 ### Step 1: Connect to the remote vLLM server via SSH tunnel
 - **Needed from you:** the remote desktop's address (LAN IP, VPN or Tailscale name), SSH username and port,
-  the port vLLM listens on there (probably 8000), and whether SSH login already works with a password.
+  the port vLLM listens on there (11436, per the command you were given), and whether SSH login already works with a password.
 - **Action:**
   1. On this laptop (Windows has the OpenSSH client built in): generate a key (`ssh-keygen -t ed25519`) and install it on the remote host's `~/.ssh/authorized_keys`.
      **You run the key-install step**, because it needs your remote password once.
   2. Add a `Host vllm-remote` entry to `~/.ssh/config` (outside the repo) with `HostName`, `User`, `Port`, `IdentityFile`,
-     `LocalForward 8000 127.0.0.1:<remote vLLM port>`, `ServerAliveInterval 30` and `ExitOnForwardFailure yes`.
-  3. Add `scripts/connect_remote.ps1` (and a `.sh` twin) to the repo. It runs `ssh -N vllm-remote`, waits until `http://localhost:8000/v1/models` answers,
+     `LocalForward 11436 localhost:11436`, `ServerAliveInterval 30` and `ExitOnForwardFailure yes`.
+  3. Add `scripts/connect_remote.ps1` (and a `.sh` twin) to the repo. It runs `ssh -N vllm-remote`, waits until `http://localhost:11436/v1/models` answers,
      and prints the served model, or a clear error naming which part failed (SSH auth, port forward, or vLLM not running).
      It reads host settings only from `~/.ssh/config`, so no addresses or usernames are committed.
   4. Check how vLLM is bound on the remote host. If it listens on `0.0.0.0`, recommend restarting it on `127.0.0.1` (and/or adding `--api-key`) so it's reachable only through SSH.
      Optionally restart it with `--served-model-name gemma-4-31B-it` for a clean model id.
-- **Validate:** with the tunnel up, `curl http://localhost:8000/v1/models` on the laptop returns the Gemma model. One tiny chat request returns text.
+- **Validate:** with the tunnel up, `curl http://localhost:11436/v1/models` on the laptop returns the Gemma model. One tiny chat request returns text.
   With the tunnel down, the script reports the failure cleanly.
 - **Checkpoint:** commit `scripts/connect_remote.*` and the setup notes in `docs/REMOTE_VLLM.md`. Never commit SSH keys or host details.
 
-### Step 2: Remove cloud providers (D2)
+### Step 2: Remove cloud providers (D2) (done, `52f23fe`)
 - **Action:**
   - `helper_inference.py`: delete the `openai`, `gemini`, `anthropic`, `mistral` and `open_source` branches from `initialize_clients`, `call_api` and `get_api_provider`.
     Delete `get_model_max_tokens` (Together-only), the cloud SDK imports and `load_dotenv`. Keep the `openai` package: it is the client library for vLLM's OpenAI-compatible API, not the cloud service.
@@ -95,16 +95,17 @@ Only the code that sends the prompt to a model and gets text back is touched.
   A structural diff against the Step 0 commit shows that only the LLM-call layer, config, requirements and `api_keys/` changed.
 - **Checkpoint:** commit and push.
 
-### Step 3: Fix and harden the vLLM call
+### Step 3: Fix and harden the vLLM call (done)
 - **Action** (only inside the `vllm` branch of `call_api`, `initialize_clients` and the CLI):
   - Replace `extra_body={"guided_json": ...}` with `response_format={"type":"json_schema","json_schema":{"name":"psychopathologies","schema": json_schema}}`.
   - Keep the system message exactly `chunk_prompt + schema_instruction` and the user message exactly `transcript`.
-  - Endpoint: `--vllm_url` / `VLLM_BASE_URL`, default `http://localhost:8000/v1` (the tunnel). Optional `--vllm_api_key` / `VLLM_API_KEY`, read from the environment and never stored in the repo.
+  - Endpoint: `--vllm_url` / `VLLM_BASE_URL`, default `http://localhost:11436/v1` (the tunnel). Optional `VLLM_API_KEY`, read only from the environment and never stored in the repo.
   - Preflight at startup: call `/v1/models`. If the tunnel or server is down, or the configured model isn't served, fail fast with "is the SSH tunnel up? run scripts/connect_remote".
   - **Model label:** a `display_name` per model in `model_config.py` (e.g. `gemma-4-31B-it`), used for CSV `model_name` and file names instead of the raw path.
     This is metadata only and changes no values.
   - `--vllm_max_tokens` (default 8192, unchanged) and an optional `--seed`. Increase the client timeout for a 31B model over SSH.
   - Keep the markdown-fence stripping and the retry logic unchanged.
+  - Error path: reset `rating_text` per chunk. Upstream raised `UnboundLocalError` when the first chunk's call failed, and logged the previous chunk's text otherwise.
 - **Validate:** code review against the Step 0 baseline; the live check is in the Deferred section.
 - **Checkpoint:** commit and push.
 

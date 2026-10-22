@@ -21,15 +21,25 @@ def parse_args() -> argparse.Namespace:
                         help='Path to reference rating CSV file')
     parser.add_argument('--output_dir', type=str, default="../outputs/AI_ratings/",
                         help='Directory for output ratings')
-    parser.add_argument('--vllm_url', type=str, default="http://localhost:8000/v1",
-                        help='Base URL for local vLLM server (default: http://localhost:8000/v1)')
-    
+    parser.add_argument('--vllm_url', type=str, default="http://localhost:11436/v1",
+                        help='Base URL of the vLLM server, normally the SSH tunnel (default: http://localhost:11436/v1)')
+    parser.add_argument('--vllm_max_tokens', type=int, default=8192,
+                        help='Max output tokens per chunk (default: 8192)')
+    parser.add_argument('--vllm_seed', type=int, default=None,
+                        help='Sampling seed for reproducibility (default: none)')
+    parser.add_argument('--vllm_timeout', type=float, default=900.0,
+                        help='Request timeout in seconds (default: 900)')
+
     return parser.parse_args()
 
 def start_inference(args: argparse.Namespace, models: list) -> pd.DataFrame:
     #PRERATATION STEPS
-    # Set vLLM base URL so helper_inference can pick it up
+    # Set vLLM settings so helper_inference can pick them up
     os.environ["VLLM_BASE_URL"] = args.vllm_url
+    os.environ["VLLM_MAX_TOKENS"] = str(args.vllm_max_tokens)
+    os.environ["VLLM_TIMEOUT"] = str(args.vllm_timeout)
+    if args.vllm_seed is not None:
+        os.environ["VLLM_SEED"] = str(args.vllm_seed)
     clients = helper_inference.initialize_clients(models)
     schema_instruction, psychopathologies_custom_schema, basic_psychopathologies = helper_inference.get_schema_instruction(args.prompt_language)
     prompt, basic_prompt, definitions = helper_inference.load_prompts(args.prompt_dir, args.prompt_language)
