@@ -95,7 +95,7 @@ Only the code that sends the prompt to a model and gets text back is touched.
   A structural diff against the Step 0 commit shows that only the LLM-call layer, config, requirements and `api_keys/` changed.
 - **Checkpoint:** commit and push.
 
-### Step 3: Fix and harden the vLLM call (done)
+### Step 3: Fix and harden the vLLM call (done, `9e9ec79`)
 - **Action** (only inside the `vllm` branch of `call_api`, `initialize_clients` and the CLI):
   - Replace `extra_body={"guided_json": ...}` with `response_format={"type":"json_schema","json_schema":{"name":"psychopathologies","schema": json_schema}}`.
   - Keep the system message exactly `chunk_prompt + schema_instruction` and the user message exactly `transcript`.
@@ -109,7 +109,7 @@ Only the code that sends the prompt to a model and gets text back is touched.
 - **Validate:** code review against the Step 0 baseline; the live check is in the Deferred section.
 - **Checkpoint:** commit and push.
 
-### Step 4: Connect the new ratings to the analysis (configuration only)
+### Step 4: Connect the new ratings to the analysis (configuration only) (done)
 - **Action:** add `site_config_colors.py` entries for the new site keys (`vllm_0`, `vllm_10`, or whatever key the notebook derives).
   Add one clearly marked notebook variable for the path of a new ratings CSV, defaulting to the publication data. The analysis code itself is untouched.
 - **Validate:** diff shows only config and path additions.
