@@ -56,3 +56,6 @@ desktop.ini
 .Rhistory
 .RData
 .Ruserdata
+
+# -- Merged from upstream .gitignore (its *.png, outputs/figs/, outputs/tables/ rules intentionally dropped) --
+*.zip
