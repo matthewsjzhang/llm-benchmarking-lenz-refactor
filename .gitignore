@@ -1,0 +1,58 @@
+# ── Claude / AI-assistant working files (self-reference, not part of the program) ──
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE.md
+.claude-plans/
+session-data/
+*.plan.md
+*.prd.md
+.mcp.json
+
+# ── Temporary upstream clone (replaced by the Step 0 import) ──
+LLMs_psychopathologies/
+
+# ── Secrets and local config ──
+*.env
+**/*.env
+.env.*
+!.env.example
+config/*.local.*
+
+# ── Python environments and caches ──
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# ── Generated pipeline output (reproducible by running the code) ──
+src/raw_responses/
+src/parsing_errors/
+outputs/AI_ratings/
+logs/
+*.log
+
+# ── Model weights / caches (never commit) ──
+models/
+hf_cache/
+*.safetensors
+*.gguf
+*.bin
+
+# ── Editor / OS clutter ──
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── R session files ──
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata

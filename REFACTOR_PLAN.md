@@ -46,6 +46,7 @@ Only the code that sends the prompt to a model and gets text back is touched.
 | D2 | What happens to the cloud providers (OpenAI, Gemini, ...)? | **Keep them dormant:** move their imports inside their branches (lazy imports) and drop `load_dotenv`. The diff stays small, no keys or SDKs are required, and the original code stays recognisable. Alternative: delete the branches entirely. |
 | D3 | Where does the Python client run? | **Inside WSL**, next to the vLLM server: one Linux environment and no Windows/WSL networking issues. The notebook can still be opened from Windows VS Code via the WSL extension. |
 | D4 | How does upstream code get into your repo? | **Snapshot copy** (files only, no upstream history) in a single commit "Import upstream @ c89a3ea". This avoids the trailing-space index problem. Alternative: keep upstream history via a remote plus merge, which needs the one-off `core.protectNTFS` workaround. |
+| D5 | Where does vLLM run? | **Remote desktop over an SSH tunnel when available, otherwise a port on this laptop** (see Step 1b). The pipeline only ever talks to `localhost`, so the code is identical either way. If the remote GPU is bigger, you may pick a larger model there (D1 per host). |
 
 ## Working agreement for every step
 
@@ -60,7 +61,8 @@ Only the code that sends the prompt to a model and gets text back is touched.
 
 ### Step 0: Bring the upstream code into your repo
 - **Action:** Copy everything from `LLMs_psychopathologies/` (except `.git/`) into the root of `llm-benchmarking-lenz-refactor`. Create the empty `src/__init__.py` under its correct name.
-  Add a `.gitignore` exception so the tracked images are kept (`!data/03_ressources/*.png`, `!outputs/figs/*.png`, or drop the `*.png` rule).
+  Merge upstream's `.gitignore` into the repo-root `.gitignore`, which already excludes Claude working files, envs, caches, generated output and model weights.
+  Do **not** carry over upstream's blanket `*.png` rule, so the tracked images are kept.
   Delete or move away the nested `LLMs_psychopathologies/` clone once the copy is verified.
 - **No code changes.**
 - **Validate:** file count matches upstream (113 minus the trailing-space file plus `src/__init__.py`); `git status` shows only additions; spot-check hashes of the notebook and the CSVs.
@@ -81,6 +83,28 @@ Only the code that sends the prompt to a model and gets text back is touched.
   - One structured-output request (`response_format` json_schema with a toy schema) returns valid JSON.
   - One **real-sized** request (the longest German transcript plus a 10-definition prompt, `max_tokens` 8192) completes without a context-length error. Record its latency.
 - **Checkpoint:** you commit `scripts/start_vllm.sh` and `docs/VLLM_SETUP.md` (setup notes, versions, and the final tuned flags) and push.
+
+### Step 1b (optional): Run vLLM on a remote desktop over an SSH tunnel
+The local setup from Step 1 stays the **default and fallback**. This step adds a remote desktop with a stronger GPU as the preferred host.
+- **Remote host requirements:** Linux, or Windows with WSL2; an NVIDIA GPU; an OpenSSH server reachable from this laptop (LAN, VPN or Tailscale);
+  **key-based SSH login** (no passwords stored anywhere).
+- **Action:**
+  1. On the remote host, repeat Step 1 items 3–6 (venv, vLLM, model, `start_vllm.sh`). vLLM binds to **`127.0.0.1:8000` only**, never `0.0.0.0`,
+     so it can't be reached from the network except through SSH. Optionally add `--api-key` as a second layer.
+  2. On the laptop, add `config/inference.local.env`, which is gitignored and holds the connection settings:
+     `REMOTE_SSH_HOST`, `REMOTE_SSH_USER`, `REMOTE_SSH_PORT` (default 22), `REMOTE_VLLM_PORT` (default 8000),
+     `TUNNEL_LOCAL_PORT` (default **8001**), `LOCAL_VLLM_PORT` (default **8000**). Commit a placeholder `config/inference.env.example`.
+     The tunnel and the local server get separate ports so both can exist at once without clashing.
+  3. Add `scripts/connect_remote.sh` (with a `.ps1` twin for Windows). It opens the tunnel
+     (`ssh -N -L 8001:127.0.0.1:8000 user@host`, with `-o ExitOnForwardFailure=yes -o ServerAliveInterval=30`),
+     waits for `http://localhost:8001/v1/models` to answer, and prints which endpoint is active.
+     If SSH or the health check fails within a timeout, it says so and tells you to start the local server instead (`start_vllm.sh`, port 8000).
+  4. Endpoint selection in code is covered in Step 5. It's the only code that depends on this step.
+- **Validate:**
+  - With the tunnel up: `curl localhost:8001/v1/models` lists the remote model, and one real-sized request succeeds. Record its latency next to the local one.
+  - With the tunnel down: the script reports the fallback cleanly and `localhost:8000` (local vLLM) still works.
+- **Checkpoint:** you commit `scripts/connect_remote.*`, `config/inference.env.example` and the docs section, then push.
+  Never commit `inference.local.env` or SSH keys.
 
 ### Step 2: Set up the project's Python environment
 - **Action:** In WSL, create a separate **project venv** (`.venv`, Python 3.12; the pins `numpy 2.4` / `scikit-learn 1.8` need ≥3.11) and install `src/requirements.txt`.
@@ -115,7 +139,13 @@ Only the code that sends the prompt to a model and gets text back is touched.
   - Keep the system message exactly `chunk_prompt + schema_instruction` and the user message exactly `transcript`, the same as today.
   - Make `max_tokens` configurable (`--vllm_max_tokens`, default 8192). If prompt + max_tokens would exceed the server's context, clamp it with a clear warning rather than failing.
     The limit is read from `/v1/models` (`max_model_len`).
-  - Add a preflight check at startup: if the server is unreachable or the configured model isn't being served, fail fast with a readable message.
+  - **Endpoint selection** (Step 1b), checked once at startup:
+    1. if `--vllm_url` or `VLLM_BASE_URL` is set explicitly, use only that;
+    2. otherwise, if the remote tunnel answers on `localhost:<TUNNEL_LOCAL_PORT>` (8001), use it;
+    3. otherwise, fall back to local vLLM on `localhost:<LOCAL_VLLM_PORT>` (8000).
+
+    The chosen endpoint and served model are printed and written to the run log, so every CSV can be traced to the host that produced it.
+  - Add a preflight check at startup: if no endpoint answers, or the configured model isn't being served, fail fast with a readable message.
   - Optional `--seed`, passed through for reproducibility.
   - If a Qwen3-style reasoning model was chosen in D1, pass `chat_template_kwargs={"enable_thinking": False}` so the output contains only the JSON.
   - Keep the existing markdown-fence stripping and the retry logic unchanged.
@@ -145,7 +175,7 @@ Only the code that sends the prompt to a model and gets text back is touched.
 - **Checkpoint:** you commit and push.
 
 ### Step 9: Documentation cleanup
-- **Action:** Rewrite the README setup section for the local-vLLM workflow (WSL → start server → run pipeline → notebook). Remove or replace `api_keys/.your_env`.
+- **Action:** Rewrite the README setup section for the vLLM workflow (WSL → start a local server **or** connect the remote tunnel → run pipeline → notebook). Remove or replace `api_keys/.your_env`.
   Record the exact vLLM version, model, quantization and server flags, since a reader can't reproduce results without them.
 - **Validate:** follow the README from a fresh WSL shell; it works as written.
 - **Checkpoint:** you commit and push. The refactor is complete.
@@ -168,6 +198,9 @@ Only the code that sends the prompt to a model and gets text back is touched.
 | Temperature 0 is not bit-exact across vLLM versions/batching | Low-Medium | `--seed`, single-sequence serving, pinned versions recorded |
 | Laptop thermal throttling / sleep during long runs | Medium | Plugged in, sleep disabled during Step 10 |
 | `*.png` gitignore drops tracked images on import | Certain if ignored | Handled in Step 0 |
+| SSH tunnel drops mid-run | Medium | Existing retry (connection errors are retryable, up to 5 attempts); `ServerAliveInterval`; rerun the script to reconnect |
+| Remote vLLM exposed to the network | Low | Bind to `127.0.0.1` only; reachable solely through SSH; key auth; optional `--api-key` |
+| Remote and local runs use different models, so CSVs get mixed up | Medium | Distinct `--served-model-name` per host; endpoint and model logged per run |
 
 ## Acceptance
 
@@ -175,3 +208,5 @@ Only the code that sends the prompt to a model and gets text back is touched.
 - [ ] `tests/` golden suite green after every step (proves calculations are unchanged)
 - [ ] Notebook reproduces the publication tables exactly
 - [ ] Setup is reproducible from the README and `scripts/start_vllm.sh`
+- [ ] (Optional) Remote tunnel is used when it's available and the pipeline falls back to local `localhost:8000` when it isn't
+- [ ] Only program-essential files are tracked; Claude working files, envs, caches, outputs and weights are gitignored
