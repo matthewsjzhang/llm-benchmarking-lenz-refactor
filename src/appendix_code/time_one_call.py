@@ -7,25 +7,11 @@ import sys, os, time, json, argparse
 sys.path.insert(0, os.path.dirname(__file__))
 
 import tiktoken
-from utils.model_config import models_to_use  # not used directly; we define all models below
+from utils.model_config import models_to_use
 from utils import helper_inference
-from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="../api_keys/.env")
-
-# ── All models that were used in the study ──────────────────────────
-ALL_MODELS = [
-    ("open_source", "Qwen/Qwen3-Next-80B-A3B-Thinking"),
-    ("open_source", "deepseek-ai/DeepSeek-R1"),
-    ("open_source", "moonshotai/Kimi-K2-Thinking"),
-    ("gemini",      "gemini-3-pro-preview"),
-    ("anthropic",   "claude-sonnet-4-5"),
-    ("openai",      "gpt-5.1"),
-    ("gemini",      "gemini-2.5-flash"),
-    ("mistral",     "mistral-large-latest"),
-    ("open_source", "openai/gpt-oss-20b"),
-    ("openai",      "gpt-4-turbo"),
-]
+# ── Local vLLM models from model_config.py ──────────────────────────
+ALL_MODELS = list(models_to_use)
 
 # ── CLI filter ──────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
@@ -72,7 +58,7 @@ def count_tokens(text: str) -> int:
 
 def input_tokens_one_chunk(api_family: str) -> int:
     """Input tokens for ONE chunk (system/instructions + transcript)."""
-    if api_family in ("open_source", "mistral", "openai"):
+    if api_family in ("open_source", "mistral", "openai", "vllm"):
         sys_tok = count_tokens(chunk_prompt + schema_instruction)
     else:  # gemini, anthropic — schema enforced via API, not in prompt
         sys_tok = count_tokens(chunk_prompt)
@@ -83,7 +69,7 @@ def input_tokens_full_run(api_family: str) -> int:
     total = 0
     for ch in instruction_prompts_list:
         cp = ch["prompt"]
-        if api_family in ("open_source", "mistral", "openai"):
+        if api_family in ("open_source", "mistral", "openai", "vllm"):
             sys_tok = count_tokens(cp + schema_instruction)
         else:
             sys_tok = count_tokens(cp)
