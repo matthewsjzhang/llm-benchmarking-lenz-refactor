@@ -63,11 +63,59 @@ this computer                                   remote desktop (GPU)
 | `--vllm_timeout` | `900` | Request timeout in seconds |
 | `VLLM_API_KEY` (env var) | none | Only needed if the server was started with `--api-key` |
 
-For installing dependencies and running the analysis notebook, follow the
-[original setup instructions](https://github.com/42elenz/LLMs_psychopathologies#setup-instructions);
-skip the API-key section.
+### Install
+
+Python 3.11+ (the pinned `numpy`/`scikit-learn` versions require it). From the repository root:
+
+```bash
+pip install -r src/requirements.txt
+```
+
+The appendix scripts in `src/appendix_code/` also need `tiktoken` (and `transformers` for `estimate_tokens.py`),
+which upstream doesn't list in the requirements.
+
+### Outputs
+
+| Path | Contents |
+|---|---|
+| `outputs/AI_ratings/all_runs_combined_definitions_<n>_<timestamp>_<temperature>.csv` | One row per transcript × run, same columns as upstream |
+| `src/raw_responses/` | Raw model output per chunk |
+| `src/parsing_errors/` | Output of any chunk that failed; the remaining chunks and runs for that transcript are skipped (upstream behaviour) |
+
+The `model_name` column holds the model's folder name (e.g. `gemma-4-31B-it`) rather than the server's full path.
+All three output locations are gitignored.
+
+## Analysing new ratings
+
+`src/01_comparision_and_statistics.ipynb` loads the publication data by default and reproduces the paper unchanged.
+To add your own runs, list the combined CSVs in `new_ratings_csvs` (cell `vllm-new-ratings`, right after the data is loaded).
+Their sites are relabelled to the publication's naming convention:
+
+| Run | Site key |
+|---|---|
+| temperature 0, 10 definitions per chunk | `gemma-4-31B-it_temp_0_10` |
+| temperature 0, no definitions | `gemma-4-31B-it_temp_0_0` |
+| other temperature | `gemma-4-31B-it_10` / `gemma-4-31B-it_0` |
+
+These keys have colors in `src/utils/site_config_colors.py`. To use the local model as the reference AI in the
+later comparisons, set `best_ai` in the next cell to one of these keys. Everything else (study design, data
+description, and details of the analyses) is documented in the
+[original README](https://github.com/42elenz/LLMs_psychopathologies#readme).
+
+## Inference server
+
+| Setting | Value |
+|---|---|
+| Host | Remote GPU desktop, reached via SSH tunnel |
+| Endpoint (local end of tunnel) | `http://localhost:11436/v1` |
+| Served model id | `/vllm/models/gemma-4-31B-it` |
+| Max context (`max_model_len`) | 262,144 tokens |
+| vLLM version | not recorded yet (`curl http://localhost:11436/version`) |
+| Server launch flags | not recorded yet |
+
+Record the version and flags here once the tunnel is working, since results can't be reproduced without them.
 
 ## Status
 
-Code refactor in progress. Live runs against the remote model haven't been done yet;
+The code refactor is complete. Live runs against the remote model haven't been done yet;
 see the "Deferred" section of [REFACTOR_PLAN.md](REFACTOR_PLAN.md).
