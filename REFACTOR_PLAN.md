@@ -109,13 +109,13 @@ Only the code that sends the prompt to a model and gets text back is touched.
 - **Validate:** code review against the Step 0 baseline; the live check is in the Deferred section.
 - **Checkpoint:** commit and push.
 
-### Step 4: Connect the new ratings to the analysis (configuration only) (done)
+### Step 4: Connect the new ratings to the analysis (configuration only) (done, `01905c3`)
 - **Action:** add `site_config_colors.py` entries for the new site keys (`vllm_0`, `vllm_10`, or whatever key the notebook derives).
   Add one clearly marked notebook variable for the path of a new ratings CSV, defaulting to the publication data. The analysis code itself is untouched.
 - **Validate:** diff shows only config and path additions.
 - **Checkpoint:** commit and push.
 
-### Step 5: Documentation
+### Step 5: Documentation (done, except the remote server version/flags, which need the tunnel)
 - **Action:** rewrite the README setup for the new workflow: connect the SSH tunnel, then run the pipeline, then the notebook.
   Remove all API-key instructions. Record the vLLM version, model, and server flags of the remote host. Keep the Source credit and the publication-results links.
 - **Checkpoint:** commit and push. The code refactor is complete.
