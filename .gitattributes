@@ -1,0 +1,3 @@
+# Upstream stores these files with CRLF line endings; keep the bytes identical to upstream.
+src/R_analyses/code_llm_ppb_final_statistics.R -text
+src/R_analyses/esra_ppb_ai.Rmd -text
