@@ -192,5 +192,25 @@ SITE_CONFIG_KI_Vergleich = {
         "color_individual": "#148f77",  # Dark turquoise
         "color_majority": "#76d7c4"     # Medium turquoise
     },
+    "gemma-4-31B-it_temp_0_0": {
+        "name": "Gemma-4-31B Temp0",
+        "color_individual": "#5d6d7e",  # Slate grey
+        "color_majority": "#d5d8dc"     # Light grey
+    },
+    "gemma-4-31B-it_temp_0_10": {
+        "name": "Gemma-4-31B Temp0+K",
+        "color_individual": "#922b21",  # Dark red
+        "color_majority": "#e6b0aa"     # Pale red
+    },
+    "gemma-4-31B-it_0": {
+        "name": "Gemma-4-31B",
+        "color_individual": "#5d6d7e",  # Slate grey
+        "color_majority": "#d5d8dc"     # Light grey
+    },
+    "gemma-4-31B-it_10": {
+        "name": "Gemma-4-31B with Knowledge",
+        "color_individual": "#922b21",  # Dark red
+        "color_majority": "#e6b0aa"     # Pale red
+    },
 }
 
