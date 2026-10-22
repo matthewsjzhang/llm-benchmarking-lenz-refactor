@@ -1,6 +1,5 @@
 import os
 import json
-from dotenv import load_dotenv
 import pandas as pd
 from pydantic import BaseModel
 from typing import List
@@ -8,51 +7,9 @@ from collections import defaultdict, Counter
 import re
 from typing import Dict, Any
 import time
-from google.genai.types import GenerateContentConfig
-from together import Together
+# OpenAI-compatible client library, used only to talk to the local vLLM server
 from openai import OpenAI
-from google import genai
-import openai
-import anthropic
-from anthropic import transform_schema
-from mistralai import Mistral
-from dotenv import load_dotenv
 import datetime
-
-load_dotenv(dotenv_path="../api_keys/.env")
-
-def get_model_max_tokens(client_together, model_name: str) -> int:
-    """
-    Get the maximum output tokens for a Together AI model.
-    Falls back to reasonable defaults if not available.
-    """
-    max_tokens = None
-    try:
-        # Query model info from Together API
-        models = client_together.models.list()
-        for model in models:
-            if model.id == model_name:
-                # Most models have max_tokens or context_length attributes
-                if hasattr(model, 'max_tokens'):
-                    max_tokens = model.max_tokens
-                elif hasattr(model, 'context_length'):
-                    # Use 75% of context length as safe max output
-                    max_tokens = int(model.context_length * 0.75)
-                print(f"Run model with max tokens of {int(model.context_length * 0.75)}")
-    except Exception as e:
-        print(f"Could not retrieve max tokens for {model_name}: {e}")
-    if max_tokens is None:
-        # Fallback defaults based on model patterns
-        if "deepseek" in model_name.lower():
-            max_tokens = 8192
-        elif "qwen" in model_name.lower():
-            max_tokens = 8192
-        elif "gpt-oss" in model_name.lower():
-            max_tokens = 4096
-        else:
-            max_tokens = 4096  # Conservative default
-    print(f"run model {model_name} with max tokens of {max_tokens}")
-    return max_tokens
 
 def a_schema():
     class Psychopathologie(BaseModel):
@@ -118,22 +75,11 @@ def initialize_clients(models: list) -> dict:
     """
     clients = {}
     api_families = {api_family for api_family, _ in models}
-    
-    if "openai" in api_families:
-        clients["openai"] = OpenAI()
-    
-    if "gemini" in api_families:
-        clients["gemini"] = genai.Client(http_options={'api_version': 'v1beta'})
-    
-    if "anthropic" in api_families:
-        clients["anthropic"] = anthropic.Anthropic(timeout=900.0)
-    
-    if "mistral" in api_families:
-        clients["mistral"] = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
-    
-    if "open_source" in api_families:
-        clients["together"] = Together()
-    
+
+    unsupported = api_families - {"vllm"}
+    if unsupported:
+        raise ValueError(f"Only local vLLM models are supported, got api_family: {sorted(unsupported)}")
+
     if "vllm" in api_families:
         vllm_base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
         clients["vllm"] = OpenAI(
@@ -500,11 +446,6 @@ def build_transcripts_dict(folder_path: str, prompt_language: str) -> dict:
 def get_api_provider(api_family: str) -> str:
     """Map API family to provider name."""
     provider_map = {
-        "gemini": "google",
-        "openai": "openai",
-        "open_source": "together",
-        "anthropic": "anthropic",
-        "mistral": "mistral",
         "vllm": "vllm",
     }
     return provider_map.get(api_family, api_family)
@@ -514,114 +455,11 @@ def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: st
              temperature: float, run: int, txt_name: str, chunk_idx: int,
              clients: dict, schema_instruction: str, Psychopathologies, psychopathologies_schema: dict) -> str:
     """
-    Call the appropriate API based on api_family.
+    Call the local vLLM server.
     Returns the rating text response.
     Raises exception if API call fails.
     """
-    if api_family == "openai":
-        print(f"Run {run} {txt_name} {model_name} chunk {chunk_idx}")
-        # gpt-4-turbo does not support responses.parse with text_format
-        if model_name in ["gpt-4-turbo"]:
-            response = clients["openai"].chat.completions.create(
-                model=model_name,
-                temperature=temperature,
-                messages=[
-                    {"role": "system", "content": chunk_prompt + schema_instruction},
-                    {"role": "user", "content": transcript}
-                ],
-                response_format={"type": "json_object"},
-            )
-            rating_text = response.choices[0].message.content
-        else:
-            reasoning_arg = {}
-            if model_name in ["gpt-5.1", "gpt-5.1-preview", "gpt-4o"]:
-                reasoning_arg = {"reasoning": {"effort": "medium"}}
-            
-            response = clients["openai"].responses.parse(
-                model=model_name,
-                instructions=chunk_prompt,
-                input=transcript,
-                text_format=Psychopathologies,
-                **reasoning_arg,
-            )
-            rating_text = response.output_text
-        if rating_text is None:
-            raise ValueError(f"OpenAI returned None response")
-    
-    elif api_family == "gemini":
-        print(f"Run {run} {txt_name} {model_name} chunk {chunk_idx}")
-        response = clients["gemini"].models.generate_content(
-            model=model_name,
-            contents=transcript,
-            config=GenerateContentConfig(
-                system_instruction=chunk_prompt,
-                temperature=temperature,
-                candidate_count=1,
-                response_mime_type="application/json",
-                response_schema=psychopathologies_schema,
-            ),
-        )
-        rating_text = response.text
-        if rating_text is None:
-            raise ValueError(f"Gemini returned None response")
-    
-    elif api_family == "anthropic":
-        print(f"Calling Anthropic model {model_name} for run {run} on {txt_name} chunk {chunk_idx}")
-        response = clients["anthropic"].beta.messages.create(
-            model=model_name,
-            max_tokens=64000,
-            betas=["structured-outputs-2025-11-13"],
-            temperature=temperature,
-            system=chunk_prompt,
-            messages=[{"role": "user", "content": transcript}],
-            output_format={
-                "type": "json_schema",
-                "schema": transform_schema(Psychopathologies),
-            }
-        )
-        rating_text = response.content[0].text
-        if rating_text is None:
-            raise ValueError(f"Anthropic returned None response")
-    
-    elif api_family == "mistral":
-        print(f"Calling Mistral model {model_name} for run {run} on {txt_name} chunk {chunk_idx}")
-        response = clients["mistral"].chat.complete(
-            model=model_name,
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": chunk_prompt + schema_instruction},
-                {"role": "user", "content": transcript}
-            ],
-            response_format={"type": "json_object"},
-        )
-        rating_text = response.choices[0].message.content
-        if rating_text is None:
-            raise ValueError(f"Mistral returned None response")
-        
-        # Clean up markdown formatting
-        if "```json" in rating_text:
-            rating_text = rating_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in rating_text:
-            rating_text = rating_text.split("```")[1].split("```")[0].strip()
-    
-    elif api_family == "open_source":
-        print(f"Calling Together model {model_name} for run {run} on {txt_name} chunk {chunk_idx}")
-        json_schema = Psychopathologies.model_json_schema()
-        response = clients["together"].chat.completions.create(
-            model=model_name,
-            max_tokens=get_model_max_tokens(clients["together"], model_name),
-            messages=[
-                {"role": "system", "content": chunk_prompt + schema_instruction},
-                {"role": "user", "content": transcript}
-            ],
-            temperature=temperature,
-            response_format={"type": "json_schema", "schema": json_schema}
-        )
-        rating_text = response.choices[0].message.content
-        if rating_text is None:
-            raise ValueError(f"Together returned None response")
-    
-    elif api_family == "vllm":
+    if api_family == "vllm":
         print(f"Calling local vLLM model {model_name} for run {run} on {txt_name} chunk {chunk_idx}")
         json_schema = Psychopathologies.model_json_schema()
         response = clients["vllm"].chat.completions.create(
