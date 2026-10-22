@@ -63,6 +63,26 @@ def parse_definitions(definitions_text: str):
     items.sort(key=lambda x: x["number"])
     return items
 
+def check_vllm_server(client, base_url: str, model_names: list) -> None:
+    """
+    Fail fast if the vLLM server is unreachable or does not serve the configured models.
+    """
+    try:
+        served = [m.id for m in client.models.list()]
+    except Exception as e:
+        raise RuntimeError(
+            f"Cannot reach vLLM server at {base_url} ({e}). "
+            f"Is the SSH tunnel open? Check with: curl {base_url}/models"
+        ) from e
+    missing = [m for m in model_names if m not in served]
+    if missing:
+        raise RuntimeError(
+            f"vLLM server at {base_url} does not serve {missing}. Served models: {served}. "
+            f"Update src/utils/model_config.py to match."
+        )
+    print(f"vLLM server at {base_url} serves: {served}")
+
+
 def initialize_clients(models: list) -> dict:
     """
     Initialize only the API clients needed for the given models.
@@ -81,12 +101,20 @@ def initialize_clients(models: list) -> dict:
         raise ValueError(f"Only local vLLM models are supported, got api_family: {sorted(unsupported)}")
 
     if "vllm" in api_families:
-        vllm_base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+        vllm_base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:11436/v1")
         clients["vllm"] = OpenAI(
             base_url=vllm_base_url,
-            api_key="EMPTY",  # vLLM doesn't require a real key
+            api_key=os.environ.get("VLLM_API_KEY", "EMPTY"),  # only checked if the server uses --api-key
+            timeout=float(os.environ.get("VLLM_TIMEOUT", "900")),
         )
-    
+        seed = os.environ.get("VLLM_SEED")
+        clients["vllm_options"] = {
+            "max_tokens": int(os.environ.get("VLLM_MAX_TOKENS", "8192")),
+            "seed": int(seed) if seed else None,
+        }
+        check_vllm_server(clients["vllm"], vllm_base_url,
+                          [m for family, m in models if family == "vllm"])
+
     return clients
 
 
@@ -451,6 +479,17 @@ def get_api_provider(api_family: str) -> str:
     return provider_map.get(api_family, api_family)
 
 
+def model_label(model_name: str) -> str:
+    """
+    Model name as written to CSVs and file names.
+    vLLM may serve a model under its filesystem path (e.g. /mnt/.../gemma-4-31B-it);
+    use the folder name then. Otherwise keep the upstream convention ('/' -> '_').
+    """
+    if model_name.startswith("/"):
+        return os.path.basename(model_name.rstrip("/"))
+    return model_name.replace('/', '_')
+
+
 def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: str, 
              temperature: float, run: int, txt_name: str, chunk_idx: int,
              clients: dict, schema_instruction: str, Psychopathologies, psychopathologies_schema: dict) -> str:
@@ -462,15 +501,22 @@ def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: st
     if api_family == "vllm":
         print(f"Calling local vLLM model {model_name} for run {run} on {txt_name} chunk {chunk_idx}")
         json_schema = Psychopathologies.model_json_schema()
+        options = clients.get("vllm_options", {})
+        seed_arg = {"seed": options["seed"]} if options.get("seed") is not None else {}
         response = clients["vllm"].chat.completions.create(
             model=model_name,
-            max_tokens=8192,
+            max_tokens=options.get("max_tokens", 8192),
             messages=[
                 {"role": "system", "content": chunk_prompt + schema_instruction},
                 {"role": "user", "content": transcript}
             ],
             temperature=temperature,
-            extra_body={"guided_json": json_schema},
+            # guided_json was removed in vLLM 0.12; json_schema response_format is the supported equivalent
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "psychopathologies", "schema": json_schema},
+            },
+            **seed_arg,
         )
         rating_text = response.choices[0].message.content
         if rating_text is None:
@@ -524,7 +570,7 @@ def save_raw_response(rating_text: str, response_folder: str, api_family: str,
     os.makedirs(response_folder, exist_ok=True)
     chunk_filename = os.path.join(
         response_folder, 
-        f"response_{api_family}_{model_name.replace('/', '_')}_run{run}_{txt_name}_chunk{chunk_idx}.txt"
+        f"response_{api_family}_{model_label(model_name)}_run{run}_{txt_name}_chunk{chunk_idx}.txt"
     )
     with open(chunk_filename, "w", encoding="utf-8") as f:
         f.write(rating_text if rating_text else "No rating text available")
@@ -554,7 +600,8 @@ def process_single_model(api_family: str, model_name: str, transkripts: dict,
             for chunk_idx, chunk in enumerate(instruction_prompts_list, start=1):
                 chunk_prompt = chunk["prompt"]
                 allowed_numbers = set(chunk["numbers"])
-                
+                rating_text = None  # so a failed call is not reported with the previous chunk's text
+
                 try:
                     # Call API with retry
                     rating_text = process_chunk_with_retry(
@@ -575,7 +622,7 @@ def process_single_model(api_family: str, model_name: str, transkripts: dict,
                         video_type=meta["video_type"],
                         site=f"{api_family}_{number_of_definitions_in_one_run}",
                         api=api_provider,
-                        model_name=model_name.replace('/', '_'),
+                        model_name=model_label(model_name),
                         rater_id=run,
                         allowed_numbers=allowed_numbers,
                         only_allowed_columns=True,
@@ -588,10 +635,10 @@ def process_single_model(api_family: str, model_name: str, transkripts: dict,
                 
                 except Exception as e:
                     os.makedirs("./parsing_errors/", exist_ok=True)
-                    print(f"Parse error run {run} {api_family} {model_name.replace('/', '_')} {txt_name}: {e}")
+                    print(f"Parse error run {run} {api_family} {model_label(model_name)} {txt_name}: {e}")
                     err_file = os.path.join(
                         "./parsing_errors/",
-                        f"error_answer_{api_family}_{model_name.replace('/', '_')}_run{run}_{txt_name}_chunk{chunk_idx}.txt"
+                        f"error_answer_{api_family}_{model_label(model_name)}_run{run}_{txt_name}_chunk{chunk_idx}.txt"
                     )
                     with open(err_file, "w", encoding="utf-8") as f:
                         f.write(rating_text if rating_text else "No rating text")
