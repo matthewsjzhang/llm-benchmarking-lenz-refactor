@@ -115,6 +115,50 @@ description, and details of the analyses) is documented in the
 
 Record the version and flags here once the tunnel is working, since results can't be reproduced without them.
 
+## Local test server (optional)
+
+For testing the pipeline without the remote desktop, a small model can be served on a laptop GPU.
+Tested on an RTX 4060 Laptop (8 GB) under WSL2 Ubuntu 24.04 with vLLM 0.32.0 and
+[`Qwen/Qwen2.5-7B-Instruct-AWQ`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-AWQ) (Apache-2.0, revision `b250375`).
+Its ratings are for checking the pipeline end to end and aren't comparable to the remote model.
+
+**One-time setup** (inside WSL):
+
+```bash
+sudo apt update && sudo apt install -y build-essential     # gcc, needed by Triton's runtime compiler
+curl -LsSf https://astral.sh/uv/install.sh | sh            # uv package manager (user-local)
+uv venv --managed-python --python 3.12 ~/venvs/vllm        # uv's Python ships Python.h; Ubuntu's doesn't
+source ~/venvs/vllm/bin/activate && uv pip install vllm==0.32.0
+```
+
+**Start the server** (downloads the ~5.5 GB model on first start, then serves on `127.0.0.1:8000`):
+
+```bash
+bash scripts/start_vllm.sh
+```
+
+**Run the pipeline against it:** in `src/utils/model_config.py`, use the commented-out Qwen entry instead of Gemma, then:
+
+```bash
+cd src
+python 00_call_models.py --vllm_url http://localhost:8000/v1 --vllm_max_tokens 3072 --prompt_language german --transcript_dir ../data/02_transcripts_example/
+```
+
+**Limits on 8 GB:**
+
+| Item | Detail |
+|---|---|
+| Context | 22,016 tokens (fp16 KV cache). The longest prompt is 18,775 tokens (German, 10 definitions per chunk). |
+| German runs | need `--vllm_max_tokens 3072` so prompt + reply fit; a 10-item reply is about 500 tokens |
+| English runs | fit the default `--vllm_max_tokens 8192` (longest prompt 13,303 tokens) |
+| `--number_of_definitions 0` | all 100 items in one reply; may not fit in the space left for German (untested) |
+| Speed | about 50 s per German 10-definition chunk, so roughly 25 min per full German run |
+
+`scripts/start_vllm.sh` explains each server flag. In short: GPU memory use 0.86 (WSL leaves ~6.9 of 8 GiB free);
+Triton attention and the PyTorch sampler (FlashInfer would need the CUDA toolkit); no CUDA graphs and 2k-token
+prefill chunks to free memory; compact JSON output (stops runs of whitespace); and an fp16 KV cache, because fp8
+garbled this model's output.
+
 ## Status
 
 The code refactor is complete. Live runs against the remote model haven't been done yet;
