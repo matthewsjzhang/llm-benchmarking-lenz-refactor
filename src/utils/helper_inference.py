@@ -1,4 +1,5 @@
 import os
+import copy
 import json
 import pandas as pd
 from pydantic import BaseModel
@@ -490,9 +491,41 @@ def model_label(model_name: str) -> str:
     return model_name.replace('/', '_')
 
 
-def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: str, 
+def build_chunk_response_schema(Psychopathologies, allowed_numbers=None) -> dict:
+    """
+    JSON schema for structured decoding. With allowed_numbers, the response must contain exactly
+    one entry per item of the chunk, in order, each with its fixed number (so no item can be skipped).
+    Without, it is the plain Pydantic schema.
+    """
+    schema = Psychopathologies.model_json_schema()
+    if not allowed_numbers:
+        return schema
+    list_schema = schema["properties"]["psychopathologies"]
+    ref = list_schema["items"]["$ref"].split("/")[-1]
+    item_schema = schema.get("$defs", {}).pop(ref)
+    number_key = find_number_key(item_schema["properties"])
+    numbers = sorted(allowed_numbers)
+    prefix_items = []
+    for num in numbers:
+        entry = copy.deepcopy(item_schema)
+        entry["properties"][number_key] = {"type": "integer", "const": num}
+        prefix_items.append(entry)
+    schema["properties"]["psychopathologies"] = {
+        "type": "array",
+        "prefixItems": prefix_items,
+        "items": False,
+        "minItems": len(numbers),
+        "maxItems": len(numbers),
+    }
+    if not schema.get("$defs"):
+        schema.pop("$defs", None)
+    return schema
+
+
+def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: str,
              temperature: float, run: int, txt_name: str, chunk_idx: int,
-             clients: dict, schema_instruction: str, Psychopathologies, psychopathologies_schema: dict) -> str:
+             clients: dict, schema_instruction: str, Psychopathologies, psychopathologies_schema: dict,
+             allowed_numbers=None) -> str:
     """
     Call the local vLLM server.
     Returns the rating text response.
@@ -500,7 +533,7 @@ def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: st
     """
     if api_family == "vllm":
         print(f"Calling local vLLM model {model_name} for run {run} on {txt_name} chunk {chunk_idx}")
-        json_schema = Psychopathologies.model_json_schema()
+        json_schema = build_chunk_response_schema(Psychopathologies, allowed_numbers)
         options = clients.get("vllm_options", {})
         seed_arg = {"seed": options["seed"]} if options.get("seed") is not None else {}
         response = clients["vllm"].chat.completions.create(
@@ -537,7 +570,7 @@ def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: st
 def process_chunk_with_retry(api_family: str, model_name: str, chunk_prompt: str, transcript: str,
                              temperature: float, run: int, txt_name: str, chunk_idx: int,
                              clients: dict, schema_instruction: str, Psychopathologies, psychopathologies_schema: dict,
-                             max_retries: int = 5, retry_delay: int = 20) -> str:
+                             max_retries: int = 5, retry_delay: int = 20, allowed_numbers=None) -> str:
     """
     Call API with exponential backoff retry logic.
     Returns rating_text on success.
@@ -546,7 +579,8 @@ def process_chunk_with_retry(api_family: str, model_name: str, chunk_prompt: str
         try:
             rating_text = call_api(api_family, model_name, chunk_prompt, transcript,
                                  temperature, run, txt_name, chunk_idx,
-                                 clients, schema_instruction, Psychopathologies, psychopathologies_schema)
+                                 clients, schema_instruction, Psychopathologies, psychopathologies_schema,
+                                 allowed_numbers=allowed_numbers)
             return rating_text
         
         except Exception as e:
@@ -607,7 +641,8 @@ def process_single_model(api_family: str, model_name: str, transkripts: dict,
                     rating_text = process_chunk_with_retry(
                         api_family, model_name, chunk_prompt, transcript,
                         temperature, run, txt_name, chunk_idx,
-                        clients, schema_instruction, Psychopathologies, psychopathologies_schema
+                        clients, schema_instruction, Psychopathologies, psychopathologies_schema,
+                        allowed_numbers=chunk["numbers"]
                     )
                     
                     # Save raw response
