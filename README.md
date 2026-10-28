@@ -115,6 +115,28 @@ description, and details of the analyses) is documented in the
 
 Record the version and flags here once the tunnel is working, since results can't be reproduced without them.
 
+## Preparing matched-pair transcripts
+
+`scripts/prepare_transcripts.py` turns CM / NON-CM session transcripts
+(`<date>_<time>_<idx>_{cm|non_cm}_p<ID>_patient_<ID>.txt`) into pipeline input. The model is never shown the arm:
+
+- the header (session id, `Arm`, interview id, patient name, target turns) and the end-of-session footer are removed;
+- each body is checked for leftover arm or session labels (any file that still has one is skipped and listed);
+- copies go to `OUTPUT_DIR/CM/` and `OUTPUT_DIR/NON-CM/` as `<patient>_<arm>-<session>_<language>.txt`;
+- `OUTPUT_DIR/manifest.csv` maps each copy to its original file, arm, patient, interview id, turns, and whether the session completed.
+
+The input files are never modified. The interview text, including the bracketed tone/behaviour notes, is kept as-is.
+
+```bash
+python scripts/prepare_transcripts.py <matched_pairs_dir> <output_dir>
+cd src
+python 00_call_models.py --transcript_dir <output_dir>/CM/ --prompt_language english --output_dir ../outputs/AI_ratings/CM/
+python 00_call_models.py --transcript_dir <output_dir>/NON-CM/ --prompt_language english --output_dir ../outputs/AI_ratings/NON-CM/
+```
+
+Sessions without an end marker ended early, so check the manifest's `completed` and `turns` columns before analysis.
+Keep `<output_dir>` outside the repository; the transcripts are research data and shouldn't be committed.
+
 ## Local test server (optional)
 
 For testing the pipeline without the remote desktop, a small model can be served on a laptop GPU.
