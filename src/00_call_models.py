@@ -10,7 +10,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Run psychopathology rating with LLMs')
     parser.add_argument('--outer_runs', type=int, default=1, help='Number of outer runs (default: 1)')
     parser.add_argument('--number_of_definitions', type=int, default=10, help='Number of definitions per run (default: 10, 0 for no definitions)')
-    parser.add_argument('--temperature', type=float, default=0.0, help='Temperature for model generation (default: 0.5)')
+    parser.add_argument('--temperature', type=float, default=0.0, help='Temperature for model generation (default: 0.0)')
     parser.add_argument('--prompt_language', type=str, choices=['german', 'english'], default='german',)
 
     parser.add_argument('--prompt_dir', type=str, default="../data/01_prompts/", 
@@ -26,9 +26,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--vllm_max_tokens', type=int, default=8192,
                         help='Max output tokens per chunk (default: 8192)')
     parser.add_argument('--vllm_seed', type=int, default=None,
-                        help='Sampling seed for reproducibility (default: none)')
+                        help='Sampling seed for reproducibility (default: none). The seed is offset per '
+                             'outer run: run r (1-based) is sent seed N + r, so runs differ when temperature > 0')
     parser.add_argument('--vllm_timeout', type=float, default=900.0,
                         help='Request timeout in seconds (default: 900)')
+    parser.add_argument('--resume_from', type=str, default=None,
+                        help='raw_responses job folder of an earlier job (e.g. ./raw_responses/'
+                             '20260101_120000_defs10_temp0.0). Chunk responses saved there are reused '
+                             'instead of calling the model. Use the same settings as that job.')
 
     return parser.parse_args()
 
@@ -40,6 +45,8 @@ def start_inference(args: argparse.Namespace, models: list) -> pd.DataFrame:
     os.environ["VLLM_TIMEOUT"] = str(args.vllm_timeout)
     if args.vllm_seed is not None:
         os.environ["VLLM_SEED"] = str(args.vllm_seed)
+    if args.resume_from is not None:
+        os.environ["VLLM_RESUME_FROM"] = args.resume_from
     clients = helper_inference.initialize_clients(models)
     schema_instruction, psychopathologies_custom_schema, basic_psychopathologies = helper_inference.get_schema_instruction(args.prompt_language)
     prompt, basic_prompt, definitions = helper_inference.load_prompts(args.prompt_dir, args.prompt_language)

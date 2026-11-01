@@ -25,6 +25,14 @@ Commit `a52ef43` is a byte-identical import of upstream and serves as the refere
 | Model config | `src/utils/model_config.py` lists the vLLM-served model (currently `gemma-4-31B-it`) |
 | vLLM call | Updated to the current vLLM structured-output API (`guided_json` was removed in vLLM 0.12); startup check that the server is reachable; configurable output length, seed and timeout |
 | Timing appendix | `time_one_call.py` times the configured vLLM model instead of the paper's cloud models |
+| Definitions data | Fixed a typo in `data/01_prompts/All_Items_german.txt` (`B#eispiele` -> `Beispiele`). The parser splits on `#`, so item 23 (Vorbeireden) was sent as a 217-character stub. The German prompt for item 23 therefore differs from the paper's run, whose models saw the truncated definition |
+| Failure handling | A failed chunk now only skips that transcript's run instead of every later transcript |
+| Retries and diagnostics | Timeouts, connection errors and server 5xx responses are retried; truncated output (`finish_reason == "length"`) is detected; empty content caused by a reasoning parser is reported |
+| Seeds | `--vllm_seed` is offset per outer run, so runs differ at temperature > 0 |
+| Raw output | Raw responses and parsing errors go to per-job subfolders `src/raw_responses/<job>/` and `src/parsing_errors/<job>/`, where `<job>` is `<timestamp>_defs<n>_temp<t>` |
+| Combined CSV | Appended after each transcript, so a crash loses at most one transcript |
+| Resuming | `--resume_from <job folder>` reuses saved raw responses instead of calling the model again |
+| Startup probe | Checks that the server's structured-output backend supports the chunk schema (`VLLM_SKIP_PROBE=1` disables it) |
 
 Plot colors for the paper's cloud models are kept in `site_config_colors.py` so the notebook can still
 reproduce the published figures. The full step-by-step plan and its status are in [REFACTOR_PLAN.md](REFACTOR_PLAN.md).
@@ -59,9 +67,11 @@ this computer                                   remote desktop (GPU)
 |---|---|---|
 | `--vllm_url` | `http://localhost:11436/v1` | OpenAI-compatible endpoint (the tunnel) |
 | `--vllm_max_tokens` | `8192` | Max output tokens per chunk (same as upstream) |
-| `--vllm_seed` | none | Sampling seed, for reproducibility |
+| `--vllm_seed` | none | Base sampling seed, for reproducibility (offset per outer run) |
 | `--vllm_timeout` | `900` | Request timeout in seconds |
+| `--resume_from` | none | Job folder under `src/raw_responses/` whose saved raw responses are reused |
 | `VLLM_API_KEY` (env var) | none | Only needed if the server was started with `--api-key` |
+| `VLLM_SKIP_PROBE` (env var) | unset | Set to `1` to skip the startup check of the structured-output backend |
 
 ### Install
 
@@ -79,8 +89,8 @@ which upstream doesn't list in the requirements.
 | Path | Contents |
 |---|---|
 | `outputs/AI_ratings/all_runs_combined_definitions_<n>_<timestamp>_<temperature>.csv` | One row per transcript × run, same columns as upstream |
-| `src/raw_responses/` | Raw model output per chunk |
-| `src/parsing_errors/` | Output of any chunk that failed; the remaining chunks and runs for that transcript are skipped (upstream behaviour) |
+| `src/raw_responses/<timestamp>_defs<n>_temp<t>/` | One subfolder per job: raw model output per chunk |
+| `src/parsing_errors/<timestamp>_defs<n>_temp<t>/` | Output of any chunk that failed; only that transcript's run is skipped, later transcripts continue |
 
 The `model_name` column holds the model's folder name (e.g. `gemma-4-31B-it`) rather than the server's full path.
 All three output locations are gitignored.
@@ -101,6 +111,10 @@ These keys have colors in `src/utils/site_config_colors.py`. To use the local mo
 later comparisons, set `best_ai` in the next cell to one of these keys. Everything else (study design, data
 description, and details of the analyses) is documented in the
 [original README](https://github.com/42elenz/LLMs_psychopathologies#readme).
+
+Note: the notebook and R analyses are designed around the three reference videos with expert ratings.
+Matched-pair CM / NON-CM transcripts have no reference row, so they need a separate analysis (pairing sessions
+per patient via `manifest.csv` and comparing arms), which this repo does not yet contain.
 
 ## Inference server
 
@@ -184,4 +198,6 @@ garbled this model's output.
 ## Status
 
 The code refactor is complete. Live runs against the remote model haven't been done yet;
-see the "Deferred" section of [REFACTOR_PLAN.md](REFACTOR_PLAN.md).
+see the "Deferred" section of [REFACTOR_PLAN.md](REFACTOR_PLAN.md). The robustness changes (failure handling,
+retries, per-job output folders, resume, startup probe) were verified with offline unit tests only
+(`py -3 -m pytest tests -q`).

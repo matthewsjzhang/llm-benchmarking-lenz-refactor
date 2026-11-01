@@ -564,7 +564,7 @@ Definition
 Die Antworten des Patienten stehen in keinem Zusammenhang
 mit der gestellten Frage, obwohl auf Nachfragen klar wird, dass
 er die Frage verstanden hat.
-Erläuterungen und B#eispiele
+Erläuterungen und Beispiele
 Vorbeireden wird manchmal auch als „Danebenreden“ bezeichnet (z. B. ICD-10). Entscheidend für die Beurteilung ist
 nicht, dass die Antwort falsch ist (wie z. B. bei einer falschen
 Prüfungsantwort), sondern dass der Patient am Inhalt der Frage

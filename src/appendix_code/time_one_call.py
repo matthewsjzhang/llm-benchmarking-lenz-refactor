@@ -4,7 +4,8 @@ Uses 1 transcript, 1 chunk (10 definitions), temperature=0.
 Then extrapolates to full majority-voting setup (10 chunks × 10 runs = 100 calls).
 """
 import sys, os, time, json, argparse
-sys.path.insert(0, os.path.dirname(__file__))
+# Run from src/:  py -3 appendix_code/time_one_call.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tiktoken
 from utils.model_config import models_to_use

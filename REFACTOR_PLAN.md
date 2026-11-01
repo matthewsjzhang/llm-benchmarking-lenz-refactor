@@ -46,6 +46,10 @@ Only the code that sends the prompt to a model and gets text back is touched.
 4. **One upstream file is named `src/__init__.py ` (trailing space)**, which Windows can't create. It's recreated as `src/__init__.py`.
 5. **Upstream `.gitignore` ignores `*.png`, `outputs/figs/` and `outputs/tables/`** even though upstream tracks files there. Copying those rules would silently drop them.
 6. **Upstream has no LICENSE file.** Redistribution rights are unclear; it's worth asking the authors, or keeping this repo private, before making it public.
+7. **German item 23 truncated (upstream data).** `All_Items_german.txt` line 567 had `B#eispiele`; the parser splits on `#`, so item 23 (Vorbeireden) was sent as a 217-character stub and about 1,500 characters were dropped. Fixed here, so the German item 23 prompt differs from the paper's run.
+8. **`model_parse_failed` is never reset.** Once one chunk fails, the flag stays set and every later transcript is skipped.
+9. **The retry filter misses `Request timed out.` and server 5xx errors**, so transient failures abort the chunk instead of being retried.
+10. **The seed is fixed across outer runs.** With `--vllm_seed` set, every run repeats the same samples, so runs don't differ at temperature > 0.
 
 ## Working agreement for every step
 

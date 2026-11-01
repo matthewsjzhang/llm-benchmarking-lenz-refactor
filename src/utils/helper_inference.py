@@ -9,8 +9,18 @@ import re
 from typing import Dict, Any
 import time
 # OpenAI-compatible client library, used only to talk to the local vLLM server
+import openai
 from openai import OpenAI
 import datetime
+
+
+class TruncatedResponseError(RuntimeError):
+    """The model stopped because it hit max_tokens (finish_reason == "length")."""
+
+
+class EmptyResponseError(RuntimeError):
+    """The server returned no message content."""
+
 
 def a_schema():
     class Psychopathologie(BaseModel):
@@ -39,10 +49,11 @@ def extract_psy_cols(df):
 def parse_definitions(definitions_text: str):
     """
     Split the big definitions string into structured items.
-    Separator assumed to be lines starting with #### (or ###).
+    Separator: lines that consist only of hashes (####, optionally trailing spaces).
+    A '#' inside a definition (e.g. a typo) does not split it.
     Returns list of dicts: {number, name, full_text}
     """
-    raw_chunks = re.split(r'\n?#+\n?', definitions_text)
+    raw_chunks = re.split(r'^#+[ \t]*$', definitions_text, flags=re.MULTILINE)
     items = []
     for chunk in raw_chunks:
         chunk = chunk.strip()
@@ -82,6 +93,63 @@ def check_vllm_server(client, base_url: str, model_names: list) -> None:
             f"Update src/utils/model_config.py to match."
         )
     print(f"vLLM server at {base_url} serves: {served}")
+    if os.environ.get("VLLM_SKIP_PROBE") == "1":
+        print("Skipping structured-output schema probe (VLLM_SKIP_PROBE=1)")
+        return
+    for model_name in model_names:
+        probe_structured_output(client, base_url, model_name)
+
+
+def build_probe_schema() -> dict:
+    """Tiny schema using the same JSON-schema features as build_chunk_response_schema."""
+    return {
+        "type": "object",
+        "properties": {
+            "psychopathologies": {
+                "type": "array",
+                "prefixItems": [{
+                    "type": "object",
+                    "properties": {"Number": {"type": "integer", "const": 1}},
+                    "required": ["Number"],
+                }],
+                "items": False,
+                "minItems": 1,
+                "maxItems": 1,
+            }
+        },
+        "required": ["psychopathologies"],
+    }
+
+
+def probe_structured_output(client, base_url: str, model_name: str) -> None:
+    """
+    Send one tiny request with a chunk-like json_schema so a structured-output backend that
+    cannot handle the chunk schema fails here, not on the first real chunk.
+    Skip with VLLM_SKIP_PROBE=1.
+    """
+    try:
+        client.chat.completions.create(
+            model=model_name,
+            max_tokens=32,
+            temperature=0,
+            messages=[{"role": "user", "content": "ping"}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "psychopathologies", "schema": build_probe_schema()},
+            },
+        )
+    except openai.BadRequestError as e:
+        raise RuntimeError(
+            f"vLLM server at {base_url} rejected the chunk response schema for {model_name}: {e}. "
+            f"The server's structured-output backend does not support the chunk schema "
+            f"(prefixItems, const, minItems/maxItems). Set VLLM_SKIP_PROBE=1 to skip this check."
+        ) from e
+    except openai.APIError as e:
+        raise RuntimeError(
+            f"Structured-output probe against {base_url} for {model_name} failed: {e}. "
+            f"Set VLLM_SKIP_PROBE=1 to skip this check."
+        ) from e
+    print(f"Structured-output probe OK for {model_name}")
 
 
 def initialize_clients(models: list) -> dict:
@@ -535,7 +603,8 @@ def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: st
         print(f"Calling local vLLM model {model_name} for run {run} on {txt_name} chunk {chunk_idx}")
         json_schema = build_chunk_response_schema(Psychopathologies, allowed_numbers)
         options = clients.get("vllm_options", {})
-        seed_arg = {"seed": options["seed"]} if options.get("seed") is not None else {}
+        # Offset the seed by the (1-based) run so outer runs differ when temperature > 0
+        seed_arg = {"seed": options["seed"] + run} if options.get("seed") is not None else {}
         response = clients["vllm"].chat.completions.create(
             model=model_name,
             max_tokens=options.get("max_tokens", 8192),
@@ -551,10 +620,27 @@ def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: st
             },
             **seed_arg,
         )
-        rating_text = response.choices[0].message.content
-        if rating_text is None:
-            raise ValueError(f"vLLM returned None response")
-        
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            raise TruncatedResponseError(
+                f"Output was truncated: model {model_name} hit max_tokens="
+                f"{options.get('max_tokens', 8192)} on {txt_name} run {run} chunk {chunk_idx}. "
+                f"Raise --vllm_max_tokens."
+            )
+        message = choice.message
+        rating_text = message.content
+        if not rating_text or not rating_text.strip():
+            if getattr(message, "reasoning_content", None):
+                raise EmptyResponseError(
+                    f"vLLM returned reasoning_content but no content for {model_name} on "
+                    f"{txt_name} run {run} chunk {chunk_idx}. The server's reasoning parser probably "
+                    f"swallowed the JSON: disable the reasoning parser (--reasoning-parser) or check "
+                    f"the chat template."
+                )
+            raise EmptyResponseError(
+                f"vLLM returned empty content for {model_name} on {txt_name} run {run} chunk {chunk_idx}"
+            )
+
         # Clean up markdown formatting if present
         if "```json" in rating_text:
             rating_text = rating_text.split("```json")[1].split("```")[0].strip()
@@ -565,6 +651,25 @@ def call_api(api_family: str, model_name: str, chunk_prompt: str, transcript: st
         raise ValueError(f"Unknown API family: {api_family}")
     
     return rating_text
+
+
+def is_retryable_error(e: Exception) -> bool:
+    """
+    Retry timeouts, connection errors, rate limits, server errors (status >= 500) and
+    truncated/empty responses. Other openai errors (e.g. BadRequestError 400 for an unsupported
+    schema) fail fast. Non-openai exceptions fall back to matching the message text.
+    """
+    if isinstance(e, (TruncatedResponseError, EmptyResponseError)):
+        return True
+    if isinstance(e, (openai.APITimeoutError, openai.APIConnectionError, openai.RateLimitError)):
+        return True
+    if isinstance(e, openai.APIStatusError):
+        return e.status_code >= 500
+    if isinstance(e, openai.APIError):
+        return False
+    return any(x in str(e).lower() for x in
+               ['503', 'overloaded', 'unavailable', 'timeout', '429', 'rate limit',
+                'connection refused', 'connection error'])
 
 
 def process_chunk_with_retry(api_family: str, model_name: str, chunk_prompt: str, transcript: str,
@@ -584,11 +689,9 @@ def process_chunk_with_retry(api_family: str, model_name: str, chunk_prompt: str
             return rating_text
         
         except Exception as e:
-            error_msg = str(e)
-            is_retryable = any(x in error_msg.lower() for x in 
-                             ['503', 'overloaded', 'unavailable', 'timeout', '429', 'rate limit',
-                              'connection refused', 'connection error'])
-            
+            error_msg = f"{type(e).__name__}: {e}"
+            is_retryable = is_retryable_error(e)
+
             if attempt < max_retries - 1 and is_retryable:
                 wait_time = retry_delay * (2 ** attempt)
                 print(f"  Retryable error: {error_msg}. Retrying in {wait_time}s...")
@@ -598,55 +701,96 @@ def process_chunk_with_retry(api_family: str, model_name: str, chunk_prompt: str
                 raise
 
 
-def save_raw_response(rating_text: str, response_folder: str, api_family: str, 
+NO_RATING_TEXT = "No rating text available"
+
+
+def raw_response_filename(response_folder: str, api_family: str, model_name: str,
+                          run: int, txt_name: str, chunk_idx: int) -> str:
+    return os.path.join(
+        response_folder,
+        f"response_{api_family}_{model_label(model_name)}_run{run}_{txt_name}_chunk{chunk_idx}.txt"
+    )
+
+
+def save_raw_response(rating_text: str, response_folder: str, api_family: str,
                      model_name: str, run: int, txt_name: str, chunk_idx: int) -> None:
     """Save raw API response to file."""
     os.makedirs(response_folder, exist_ok=True)
-    chunk_filename = os.path.join(
-        response_folder, 
-        f"response_{api_family}_{model_label(model_name)}_run{run}_{txt_name}_chunk{chunk_idx}.txt"
-    )
+    chunk_filename = raw_response_filename(response_folder, api_family, model_name, run, txt_name, chunk_idx)
     with open(chunk_filename, "w", encoding="utf-8") as f:
-        f.write(rating_text if rating_text else "No rating text available")
+        f.write(rating_text if rating_text else NO_RATING_TEXT)
+
+
+def load_resumed_response(resume_folder: str, api_family: str, model_name: str,
+                          run: int, txt_name: str, chunk_idx: int):
+    """Return the raw response text saved for this chunk by an earlier job, or None if there is none."""
+    if not resume_folder:
+        return None
+    path = raw_response_filename(resume_folder, api_family, model_name, run, txt_name, chunk_idx)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if not text or text == NO_RATING_TEXT:
+        return None
+    return text
+
+
+def job_folder_name(time_tag: str, number_of_definitions_in_one_run: int, temperature: float) -> str:
+    """Per-job subfolder name for raw responses and parsing errors."""
+    return f"{time_tag}_defs{number_of_definitions_in_one_run}_temp{temperature}"
 
 
 def process_single_model(api_family: str, model_name: str, transkripts: dict, 
                         instruction_prompts_list: list, outer_runs: int, temperature: float,
                         number_of_definitions_in_one_run: int, clients: dict, 
-                        schema_instruction: str, Psychopathologies, psychopathologies_schema: dict, reference_df) -> tuple[list, bool]:
+                        schema_instruction: str, Psychopathologies, psychopathologies_schema: dict, reference_df,
+                        raw_folder: str = "./raw_responses/", error_folder: str = "./parsing_errors/",
+                        resume_folder: str = None, on_transcript_done=None) -> tuple[list, list]:
     """
     Process all transcripts for a single model.
-    Returns (results_list, model_failed_flag)
+    A failed chunk drops only its (transcript, run); the next run and transcript still run.
+    resume_folder: raw_responses job folder of an earlier job; saved chunk responses found there
+                   are used instead of calling the model.
+    on_transcript_done: optional callback(result_df) called after each finished transcript.
+    Returns (results_list, failed_runs) where failed_runs is a list of
+    (txt_name, run, chunk_idx, error) tuples (empty when everything succeeded).
     """
     api_provider = get_api_provider(api_family)
-    model_parse_failed = False
+    failed_runs = []
     all_model_results = []
-    
+
     for txt_name, meta in transkripts.items():
         with open(meta["path"], encoding="utf-8") as f:
             transcript = f.read().strip()
-        
+
         rows = []
-        
+
         for run in range(1, outer_runs + 1):
             partial_rows = []
-            
+            run_failed = False
+
             for chunk_idx, chunk in enumerate(instruction_prompts_list, start=1):
                 chunk_prompt = chunk["prompt"]
                 allowed_numbers = set(chunk["numbers"])
                 rating_text = None  # so a failed call is not reported with the previous chunk's text
 
                 try:
-                    # Call API with retry
-                    rating_text = process_chunk_with_retry(
-                        api_family, model_name, chunk_prompt, transcript,
-                        temperature, run, txt_name, chunk_idx,
-                        clients, schema_instruction, Psychopathologies, psychopathologies_schema,
-                        allowed_numbers=chunk["numbers"]
-                    )
-                    
+                    rating_text = load_resumed_response(resume_folder, api_family, model_name,
+                                                        run, txt_name, chunk_idx)
+                    if rating_text is not None:
+                        print(f"Resumed run {run} {txt_name} chunk {chunk_idx} from {resume_folder}")
+                    else:
+                        # Call API with retry
+                        rating_text = process_chunk_with_retry(
+                            api_family, model_name, chunk_prompt, transcript,
+                            temperature, run, txt_name, chunk_idx,
+                            clients, schema_instruction, Psychopathologies, psychopathologies_schema,
+                            allowed_numbers=chunk["numbers"]
+                        )
+
                     # Save raw response
-                    save_raw_response(rating_text, "./raw_responses/", api_family, 
+                    save_raw_response(rating_text, raw_folder, api_family,
                                     model_name, run, txt_name, chunk_idx)
                     
                     # Parse JSON and convert to dataframe
@@ -669,21 +813,24 @@ def process_single_model(api_family: str, model_name: str, transkripts: dict,
                     partial_rows.append(df_row)
                 
                 except Exception as e:
-                    os.makedirs("./parsing_errors/", exist_ok=True)
-                    print(f"Parse error run {run} {api_family} {model_label(model_name)} {txt_name}: {e}")
+                    os.makedirs(error_folder, exist_ok=True)
+                    print(f"Parse error run {run} {api_family} {model_label(model_name)} {txt_name} "
+                          f"chunk {chunk_idx}: {e}")
                     err_file = os.path.join(
-                        "./parsing_errors/",
+                        error_folder,
                         f"error_answer_{api_family}_{model_label(model_name)}_run{run}_{txt_name}_chunk{chunk_idx}.txt"
                     )
                     with open(err_file, "w", encoding="utf-8") as f:
-                        f.write(rating_text if rating_text else "No rating text")
-                    model_parse_failed = True
+                        f.write(rating_text if rating_text else f"No rating text\n{type(e).__name__}: {e}")
+                    failed_runs.append((txt_name, run, chunk_idx, f"{type(e).__name__}: {e}"))
+                    run_failed = True
                     break
-            
-            if model_parse_failed:
-                print(f"Skipping remaining chunks/runs for model {model_name} due to parse error.")
-                break
-            
+
+            if run_failed:
+                print(f"Dropping run {run} of {txt_name} for model {model_name}; "
+                      f"continuing with the next run/transcript.")
+                continue
+
             # Merge chunks for this run
             merged = merge_partial_rows(partial_rows)
             if merged is not None:
@@ -696,17 +843,30 @@ def process_single_model(api_family: str, model_name: str, transkripts: dict,
         if rows:
             result_df = pd.concat(rows, ignore_index=True)
             all_model_results.append(result_df)
-    
-    return all_model_results, model_parse_failed
+            if on_transcript_done is not None:
+                on_transcript_done(result_df)
+
+    if failed_runs:
+        print(f"\n{len(failed_runs)} failed (transcript, run) pair(s) for model {model_name} "
+              f"(error files in {error_folder}):")
+        for txt_name, run, chunk_idx, error in failed_runs:
+            print(f"  {txt_name} run {run} (chunk {chunk_idx}): {error}")
+    else:
+        print(f"All transcripts and runs succeeded for model {model_name}.")
+
+    return all_model_results, failed_runs
 
 
 def run_psychopathology_rating(models: list, transkripts: dict, instruction_prompts_list: list,
                               outer_runs: int, temperature: float, number_of_definitions_in_one_run: int,
                               clients: dict, schema_instruction: str, Psychopathologies, psychopathologies_schema: Dict[str, Any],
-                              reference_df, rating_folder: str) -> pd.DataFrame:
+                              reference_df, rating_folder: str, resume_from: str = None) -> pd.DataFrame:
     """
     Main orchestration function. Runs all models on all transcripts.
-    Returns combined results dataframe.
+    Each finished transcript is appended to the combined CSV right away; at the end the CSV is
+    rewritten from all results (same content as a single write).
+    resume_from: raw_responses job folder of an earlier job (default: env VLLM_RESUME_FROM).
+    Returns combined results dataframe (empty if nothing succeeded).
     """
     print(f"Instruction prompt example (with {number_of_definitions_in_one_run} definitions):\n"
           f"{instruction_prompts_list[0]['prompt'][:1000]}...\n")
@@ -715,19 +875,58 @@ def run_psychopathology_rating(models: list, transkripts: dict, instruction_prom
     
     all_results = []
     time_tag = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
+    job_name = job_folder_name(time_tag, number_of_definitions_in_one_run, temperature)
+    raw_folder = os.path.join("./raw_responses/", job_name)
+    error_folder = os.path.join("./parsing_errors/", job_name)
+    print(f"Raw responses for this job go to: {raw_folder}")
+    print(f"Parsing errors for this job go to: {error_folder}")
+
+    if resume_from is None:
+        resume_from = os.environ.get("VLLM_RESUME_FROM") or None
+    if resume_from:
+        if not os.path.isdir(resume_from):
+            raise FileNotFoundError(f"Resume folder not found: {resume_from}")
+        print(f"RESUMING: chunk responses saved in {resume_from} are reused instead of calling the model")
+        expected_suffix = f"_defs{number_of_definitions_in_one_run}_temp{temperature}"
+        if not os.path.basename(os.path.normpath(resume_from)).endswith(expected_suffix):
+            print(f"WARNING: resume folder name does not end with '{expected_suffix}'; "
+                  f"it may come from a job with a different configuration.")
+
+    output_path = os.path.join(rating_folder,
+                              f"all_runs_combined_definitions_{number_of_definitions_in_one_run}_{time_tag}_{temperature}.csv")
+    saved_so_far = []
+    saved_header = []
+
+    def save_transcript_rows(result_df):
+        # Incremental save so a crash does not lose finished transcripts
+        saved_so_far.append(result_df)
+        if saved_header and list(result_df.columns) == saved_header:
+            result_df.to_csv(output_path, mode="a", header=False, index=False)
+        else:
+            # first write (with header), or the columns changed: rewrite what is saved so far
+            combined = pd.concat(saved_so_far, ignore_index=True)
+            combined.to_csv(output_path, index=False)
+            saved_header[:] = list(combined.columns)
+        print(f"Saved progress to {output_path}")
+
     for api_family, model_name in models:
         results, _ = process_single_model(
             api_family, model_name, transkripts,
             instruction_prompts_list, outer_runs, temperature,
             number_of_definitions_in_one_run, clients,
-            schema_instruction, Psychopathologies, psychopathologies_schema, reference_df
+            schema_instruction, Psychopathologies, psychopathologies_schema, reference_df,
+            raw_folder=raw_folder, error_folder=error_folder,
+            resume_folder=resume_from, on_transcript_done=save_transcript_rows
         )
         all_results.extend(results)
-    
+
+    if not all_results:
+        print("No transcript/run produced results (every run failed). Nothing was written. "
+              f"See the error files in {error_folder}.")
+        return pd.DataFrame()
+
+    # Final write from all results in one go: same content as before incremental saving
     all_results_df = pd.concat(all_results, ignore_index=True)
-    output_path = os.path.join(rating_folder, 
-                              f"all_runs_combined_definitions_{number_of_definitions_in_one_run}_{time_tag}_{temperature}.csv")
     all_results_df.to_csv(output_path, index=False)
     print(f"Saved combined results to {output_path}")
     
