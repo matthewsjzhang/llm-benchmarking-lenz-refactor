@@ -32,6 +32,7 @@ Commit `a52ef43` is a byte-identical import of upstream and serves as the refere
 | Raw output | Raw responses and parsing errors go to per-job subfolders `src/raw_responses/<job>/` and `src/parsing_errors/<job>/`, where `<job>` is `<timestamp>_defs<n>_temp<t>` |
 | Combined CSV | Appended after each transcript, so a crash loses at most one transcript |
 | Resuming | `--resume_from <job folder>` reuses saved raw responses instead of calling the model again |
+| Model override and run metadata | `--vllm_model` picks the served model id per run; each job saves its settings to `run_metadata.json` |
 | Startup probe | Checks that the server's structured-output backend supports the chunk schema (`VLLM_SKIP_PROBE=1` disables it) |
 
 Plot colors for the paper's cloud models are kept in `site_config_colors.py` so the notebook can still
@@ -65,7 +66,8 @@ this computer                                   remote desktop (GPU)
 
 | vLLM option | Default | Purpose |
 |---|---|---|
-| `--vllm_url` | `http://localhost:11436/v1` | OpenAI-compatible endpoint (the tunnel) |
+| `--vllm_url` | `http://localhost:11436/v1` | OpenAI-compatible endpoint (the tunnel, or any other vLLM server) |
+| `--vllm_model` | models in `model_config.py` | Model id exactly as listed by the server's `/v1/models`; overrides `model_config.py` for this run |
 | `--vllm_max_tokens` | `8192` | Max output tokens per chunk (same as upstream) |
 | `--vllm_seed` | none | Base sampling seed, for reproducibility (offset per outer run) |
 | `--vllm_timeout` | `900` | Request timeout in seconds |
@@ -90,10 +92,25 @@ which upstream doesn't list in the requirements.
 |---|---|
 | `outputs/AI_ratings/all_runs_combined_definitions_<n>_<timestamp>_<temperature>.csv` | One row per transcript × run, same columns as upstream |
 | `src/raw_responses/<timestamp>_defs<n>_temp<t>/` | One subfolder per job: raw model output per chunk |
+| `src/raw_responses/<timestamp>_defs<n>_temp<t>/run_metadata.json` | The job's settings: server URL, vLLM version, model id, temperature, definitions per chunk, runs, max tokens, seed, prompt language, transcript folder, start/finish time |
 | `src/parsing_errors/<timestamp>_defs<n>_temp<t>/` | Output of any chunk that failed; only that transcript's run is skipped, later transcripts continue |
 
 The `model_name` column holds the model's folder name (e.g. `gemma-4-31B-it`) rather than the server's full path.
-All three output locations are gitignored.
+All three output locations are gitignored. `run_metadata.json` contains the server URL, so don't share or
+commit it if the server is private.
+
+### Comparing servers, models and parameters
+
+The same pipeline runs against any vLLM server, so the remote model, the local test server, or another model
+can be compared on the same transcripts. Pass the server and model on the command line instead of editing
+`model_config.py`:
+
+```bash
+python 00_call_models.py --vllm_url <server>/v1 --vllm_model <id from /v1/models> --prompt_language english --transcript_dir <dir>
+```
+
+Each job's `run_metadata.json` records which server, vLLM version, model and parameters produced its CSV,
+and the CSV's `model_name` column holds the model's short name.
 
 ## Analysing new ratings
 
@@ -124,10 +141,11 @@ per patient via `manifest.csv` and comparing arms), which this repo does not yet
 | Endpoint (local end of tunnel) | `http://localhost:11436/v1` |
 | Served model id | `/vllm/models/gemma-4-31B-it` |
 | Max context (`max_model_len`) | 262,144 tokens |
-| vLLM version | not recorded yet (`curl http://localhost:11436/version`) |
+| vLLM version | 0.20.2 (also saved per job in `run_metadata.json`) |
 | Server launch flags | not recorded yet |
 
-Record the version and flags here once the tunnel is working, since results can't be reproduced without them.
+Record the launch flags here once they're known, since results can't be reproduced without them.
+If the server lists the model under a different id than `model_config.py`, pass that id with `--vllm_model`.
 
 ## Preparing matched-pair transcripts
 

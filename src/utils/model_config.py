@@ -1,6 +1,7 @@
 models_to_use = [
     # ── Local vLLM models (served on the remote desktop, reached via SSH tunnel) ──
     # model_name must match the id returned by the server's /v1/models endpoint.
+    # To use a different id for one run without editing this file, pass --vllm_model to 00_call_models.py.
     ("vllm", "/vllm/models/gemma-4-31B-it"),
 
     # ── Local test server (scripts/start_vllm.sh, run with --vllm_url http://localhost:8000/v1) ──

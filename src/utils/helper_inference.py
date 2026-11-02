@@ -12,6 +12,7 @@ import time
 import openai
 from openai import OpenAI
 import datetime
+import urllib.request
 
 
 class TruncatedResponseError(RuntimeError):
@@ -90,7 +91,7 @@ def check_vllm_server(client, base_url: str, model_names: list) -> None:
     if missing:
         raise RuntimeError(
             f"vLLM server at {base_url} does not serve {missing}. Served models: {served}. "
-            f"Update src/utils/model_config.py to match."
+            f"Update src/utils/model_config.py to match, or pass --vllm_model."
         )
     print(f"vLLM server at {base_url} serves: {served}")
     if os.environ.get("VLLM_SKIP_PROBE") == "1":
@@ -152,6 +153,20 @@ def probe_structured_output(client, base_url: str, model_name: str) -> None:
     print(f"Structured-output probe OK for {model_name}")
 
 
+def get_vllm_version(base_url: str):
+    """vLLM version reported by the server's /version endpoint, or None if it can't be read."""
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-len("/v1")]
+    # Explicit User-Agent: some reverse proxies in front of a server reject urllib's default one
+    request = urllib.request.Request(f"{root}/version", headers={"User-Agent": "llm-benchmarking-pipeline"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8")).get("version")
+    except Exception:
+        return None
+
+
 def initialize_clients(models: list) -> dict:
     """
     Initialize only the API clients needed for the given models.
@@ -183,6 +198,12 @@ def initialize_clients(models: list) -> dict:
         }
         check_vllm_server(clients["vllm"], vllm_base_url,
                           [m for family, m in models if family == "vllm"])
+        # Recorded in each job's run_metadata.json
+        clients["vllm_server"] = {
+            "base_url": vllm_base_url,
+            "vllm_version": get_vllm_version(vllm_base_url),
+            "timeout": float(os.environ.get("VLLM_TIMEOUT", "900")),
+        }
 
     return clients
 
@@ -857,15 +878,24 @@ def process_single_model(api_family: str, model_name: str, transkripts: dict,
     return all_model_results, failed_runs
 
 
+def write_run_metadata(path: str, metadata: dict) -> None:
+    """Write a job's settings to <raw job folder>/run_metadata.json."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+
 def run_psychopathology_rating(models: list, transkripts: dict, instruction_prompts_list: list,
                               outer_runs: int, temperature: float, number_of_definitions_in_one_run: int,
                               clients: dict, schema_instruction: str, Psychopathologies, psychopathologies_schema: Dict[str, Any],
-                              reference_df, rating_folder: str, resume_from: str = None) -> pd.DataFrame:
+                              reference_df, rating_folder: str, resume_from: str = None,
+                              run_metadata: dict = None) -> pd.DataFrame:
     """
     Main orchestration function. Runs all models on all transcripts.
     Each finished transcript is appended to the combined CSV right away; at the end the CSV is
     rewritten from all results (same content as a single write).
     resume_from: raw_responses job folder of an earlier job (default: env VLLM_RESUME_FROM).
+    run_metadata: extra fields (e.g. prompt language, transcript folder) for run_metadata.json.
     Returns combined results dataframe (empty if nothing succeeded).
     """
     print(f"Instruction prompt example (with {number_of_definitions_in_one_run} definitions):\n"
@@ -897,6 +927,30 @@ def run_psychopathology_rating(models: list, transkripts: dict, instruction_prom
     saved_so_far = []
     saved_header = []
 
+    # Settings of this job, so results from different servers/models/parameters can be compared later
+    metadata_path = os.path.join(raw_folder, "run_metadata.json")
+    vllm_options = clients.get("vllm_options", {})
+    metadata = {
+        "job": job_name,
+        "started": datetime.datetime.now().isoformat(timespec="seconds"),
+        "finished": None,
+        "models": [{"api_family": family, "model_name": name, "model_label": model_label(name)}
+                   for family, name in models],
+        "server": clients.get("vllm_server", {}),
+        "temperature": temperature,
+        "number_of_definitions": number_of_definitions_in_one_run,
+        "number_of_chunks": len(instruction_prompts_list),
+        "outer_runs": outer_runs,
+        "max_tokens": vllm_options.get("max_tokens"),
+        "base_seed": vllm_options.get("seed"),
+        "transcripts": len(transkripts),
+        "resume_from": resume_from,
+        "output_csv": output_path,
+        **(run_metadata or {}),
+    }
+    write_run_metadata(metadata_path, metadata)
+    print(f"Job settings saved to {metadata_path}")
+
     def save_transcript_rows(result_df):
         # Incremental save so a crash does not lose finished transcripts
         saved_so_far.append(result_df)
@@ -919,6 +973,10 @@ def run_psychopathology_rating(models: list, transkripts: dict, instruction_prom
             resume_folder=resume_from, on_transcript_done=save_transcript_rows
         )
         all_results.extend(results)
+
+    metadata["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
+    metadata["result_rows"] = sum(len(df) for df in all_results)
+    write_run_metadata(metadata_path, metadata)
 
     if not all_results:
         print("No transcript/run produced results (every run failed). Nothing was written. "

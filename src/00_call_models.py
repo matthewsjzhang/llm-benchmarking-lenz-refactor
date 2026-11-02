@@ -23,6 +23,9 @@ def parse_args() -> argparse.Namespace:
                         help='Directory for output ratings')
     parser.add_argument('--vllm_url', type=str, default="http://localhost:11436/v1",
                         help='Base URL of the vLLM server, normally the SSH tunnel (default: http://localhost:11436/v1)')
+    parser.add_argument('--vllm_model', type=str, default=None,
+                        help='Model id as listed by the server\'s /v1/models (default: the models in '
+                             'utils/model_config.py). Overrides model_config.py for this run.')
     parser.add_argument('--vllm_max_tokens', type=int, default=8192,
                         help='Max output tokens per chunk (default: 8192)')
     parser.add_argument('--vllm_seed', type=int, default=None,
@@ -71,7 +74,12 @@ def start_inference(args: argparse.Namespace, models: list) -> pd.DataFrame:
     schema_instruction=schema_instruction,
     Psychopathologies=basic_psychopathologies,
     reference_df=reference_df,
-    rating_folder=args.output_dir
+    rating_folder=args.output_dir,
+    run_metadata={
+        "prompt_language": args.prompt_language,
+        "transcript_dir": args.transcript_dir,
+        "prompt_dir": args.prompt_dir,
+    }
 )
     return all_results_df
     
@@ -83,6 +91,8 @@ def main() -> None:
 
     time.sleep(5)
     models = models_to_use
+    if args.vllm_model is not None:
+        models = [("vllm", args.vllm_model)]
     for _, model_name in models:
         print(f"Starting inference for model: {model_name}")
     all_results_df = start_inference(args, models)

@@ -267,7 +267,9 @@ def test_job_scoped_folders_and_resume(schema, transcripts, reference_df, tmp_pa
     job_folders = os.listdir(first_dir / "raw_responses")
     assert len(job_folders) == 1 and job_folders[0].endswith("_defs2_temp0.0")
     resume_folder = first_dir / "raw_responses" / job_folders[0]
-    assert len(os.listdir(resume_folder)) == 8
+    raw_files = os.listdir(resume_folder)
+    assert "run_metadata.json" in raw_files
+    assert len([f for f in raw_files if f != "run_metadata.json"]) == 8
     (first_csv,) = os.listdir(first_dir / "ratings")
 
     # Second job: every chunk comes from the resume folder, the client is never called
@@ -311,6 +313,61 @@ def test_incremental_save_survives_crash(schema, transcripts, reference_df, tmp_
 
 
 # ── Preflight probe ──
+
+def test_run_metadata_records_job_settings(schema, transcripts, reference_df, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    clients = make_clients(FakeCompletions(default=valid_response), seed=7, max_tokens=321)
+    clients["vllm_server"] = {"base_url": "http://localhost:11436/v1", "vllm_version": "0.0.test", "timeout": 5.0}
+    schema_instruction, custom_schema, Psychopathologies = schema
+    os.makedirs(tmp_path / "ratings")
+    hi.run_psychopathology_rating(
+        models=[("vllm", "/models/" + MODEL)], transkripts=transcripts, instruction_prompts_list=CHUNKS,
+        outer_runs=2, temperature=0.0, number_of_definitions_in_one_run=2, clients=clients,
+        schema_instruction=schema_instruction, Psychopathologies=Psychopathologies,
+        psychopathologies_schema=custom_schema, reference_df=reference_df,
+        rating_folder=str(tmp_path / "ratings"), run_metadata={"prompt_language": "english"})
+    (job,) = os.listdir(tmp_path / "raw_responses")
+    with open(tmp_path / "raw_responses" / job / "run_metadata.json", encoding="utf-8") as f:
+        meta = json.load(f)
+    assert meta["job"] == job
+    assert meta["models"] == [{"api_family": "vllm", "model_name": "/models/" + MODEL, "model_label": MODEL}]
+    assert meta["server"]["vllm_version"] == "0.0.test"
+    assert (meta["max_tokens"], meta["base_seed"], meta["outer_runs"]) == (321, 7, 2)
+    assert meta["number_of_chunks"] == 2 and meta["transcripts"] == 2
+    assert meta["prompt_language"] == "english"
+    assert meta["finished"] is not None and meta["result_rows"] == 4
+
+
+@pytest.mark.parametrize("base_url", ["http://host:1/v1", "http://host:1/v1/", "http://host:1"])
+def test_get_vllm_version_strips_v1(monkeypatch, base_url):
+    opened = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"version": "1.2.3"}'
+
+    def fake_urlopen(request, timeout):
+        opened.append(request.full_url)
+        assert request.get_header("User-agent")
+        return FakeResponse()
+
+    monkeypatch.setattr(hi.urllib.request, "urlopen", fake_urlopen)
+    assert hi.get_vllm_version(base_url) == "1.2.3"
+    assert opened == ["http://host:1/version"]
+
+
+def test_get_vllm_version_unreachable_returns_none(monkeypatch):
+    def fail(url, timeout):
+        raise OSError("unreachable")
+    monkeypatch.setattr(hi.urllib.request, "urlopen", fail)
+    assert hi.get_vllm_version("http://host:1/v1") is None
+
 
 def test_probe_rejected_schema_fails_fast(monkeypatch):
     monkeypatch.delenv("VLLM_SKIP_PROBE", raising=False)
